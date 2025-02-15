@@ -1,0 +1,145 @@
+import cv2
+import mediapipe as mp
+import numpy as np
+import pygame
+import time  # Import time module for delay
+    
+# Initialize MediaPipe Pose
+mp_pose = mp.solutions.pose
+pose = mp_pose.Pose()
+
+# Calibration values (adjust based on your setup)
+REFERENCE_WIDTH_PIXELS = 200  # Known width of bounding box in pixels
+REFERENCE_WIDTH_CM = 50  # Known real-world width in cm
+SCALE_FACTOR = REFERENCE_WIDTH_CM / REFERENCE_WIDTH_PIXELS
+
+def get_bounding_box(landmarks):
+    """
+    Calculate the bounding box dimensions from the detected landmarks.
+    """
+    try:
+        # Extract x and y coordinates of all landmarks
+        x_coords = [landmark.x for landmark in landmarks]
+        y_coords = [landmark.y for landmark in landmarks]
+
+        # Get the bounding box dimensions
+        min_x, max_x = min(x_coords), max(x_coords)
+        min_y, max_y = min(y_coords), max(y_coords)
+
+        # Calculate width and height
+        width = max_x - min_x
+        height = max_y - min_y
+
+        return width, height, (min_x, min_y), (max_x, max_y)
+    except Exception as e:
+        print(f"Error calculating bounding box: {e}")
+        return None, None, None, None
+
+def determine_posture(dp_value, real_height):
+    """
+    Determine posture based on DP value and real height.
+    """
+    if dp_value > 15:
+        return "Lying Down"
+    elif dp_value <= 15 and real_height <= 88:
+        return "Sitting"
+    elif real_height > 88:
+        return "Standing"
+    else:
+        return "No Detection"
+
+# Open the USB webcam (change index if needed, e.g., 1 for multiple cameras)
+cap = cv2.VideoCapture(0)
+
+# Check if webcam opened successfully
+if not cap.isOpened():
+    print("Error: Could not access webcam")
+    exit()
+
+# Initialize pygame for sound
+pygame.mixer.init()
+sound = pygame.mixer.Sound('/home/pi/Downloads/standing.wav')
+
+# To track the last time the sound was played
+last_play_time = 0
+play_delay = 5  # Delay in seconds between sound plays
+
+while True:
+    ret, frame = cap.read()
+    if not ret:
+        print("Error: Failed to capture frame")
+        break
+
+    # Convert the frame to RGB
+    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+    # Process the frame to detect body landmarks
+    results = pose.process(rgb_frame)
+
+    # Default posture if no landmarks are found
+    posture = "No Detection"
+
+    if results.pose_landmarks:
+        # Get bounding box dimensions
+        width, height, top_left, bottom_right = get_bounding_box(results.pose_landmarks.landmark)
+
+        if width and height:
+            # Convert width and height to pixels
+            width_pixels = int(width * frame.shape[1])
+            height_pixels = int(height * frame.shape[0])
+
+            # Calculate real-world dimensions
+            real_width_cm = width_pixels * SCALE_FACTOR
+            real_height_cm = height_pixels * SCALE_FACTOR
+
+            # Calculate the difference between width and height (DP)
+            dp_value = real_width_cm - real_height_cm
+
+            # Determine posture
+            posture = determine_posture(dp_value, real_height_cm)
+
+            # Draw the bounding box
+            start_point = (int(top_left[0] * frame.shape[1]), int(top_left[1] * frame.shape[0]))
+            end_point = (int(bottom_right[0] * frame.shape[1]), int(bottom_right[1] * frame.shape[0]))
+            cv2.rectangle(frame, start_point, end_point, (0, 255, 0), 2)
+
+            # Display real-world dimensions and DP value
+            cv2.putText(frame, f"Width: {real_width_cm:.2f} cm", (start_point[0], start_point[1] - 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+            cv2.putText(frame, f"Height: {real_height_cm:.2f} cm", (start_point[0], start_point[1] - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+            cv2.putText(frame, f"DP: {dp_value:.2f} cm", (start_point[0], start_point[1] - 50),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 255), 2)
+
+    # Display posture on the frame with corresponding color
+    if posture != "No Detection":
+        if posture == "Lying Down":
+            color = (0, 255, 0)  # Green
+        elif posture == "Sitting":
+            color = (0, 255, 255)  # Yellow
+        elif posture == "Standing":
+            color = (0, 0, 255)  # Red
+            current_time = time.time()
+            
+            # Play sound only if enough time has passed since the last play
+            if current_time - last_play_time > play_delay:
+                sound.play()
+                last_play_time = current_time  # Update the last play time
+
+            # Display warning for standing
+            cv2.putText(frame, "Warning! Standing", (50, 150),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+
+        cv2.putText(frame, f"Posture: {posture}", (50, 50),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2)
+
+    # Display the processed frame
+    cv2.imshow("Posture Detection", frame)
+
+    # Press 'q' to quit the program
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
+
+# Release resources
+cap.release()
+cv2.destroyAllWindows()
